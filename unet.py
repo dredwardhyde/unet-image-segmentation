@@ -1,312 +1,154 @@
-import copy
-import time
-from collections import defaultdict
-
 import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import optim
-from torch.optim import lr_scheduler
-from torch.utils.data import Dataset, DataLoader
-from torchsummary import summary
-from torchvision import models
-from torchvision import transforms
+import tensorflow as tf
+import tensorflow_datasets as tfds
 
-import helper
-# Generate some random images
-import simulation
-from loss import dice_loss
+import pix2pix
 
-input_images, target_masks = simulation.generate_random_data(192, 192, count=3)
+dataset, info = tfds.load('oxford_iiit_pet:3.*.*', with_info=True)
 
-for x in [input_images, target_masks]:
-    print(x.shape)
-    print(x.min(), x.max())
 
-# Change channel-order and make 3 channels for matplot
-input_images_rgb = [x.astype(np.uint8) for x in input_images]
+def normalize(input_image, input_mask):
+    input_image = tf.cast(input_image, tf.float32) / 255.0
+    input_mask -= 1
+    return input_image, input_mask
 
-# Map each channel (i.e. class) to each color
-target_masks_rgb = [helper.masks_to_colorimg(x) for x in target_masks]
 
-# Left: Input image (black and white), Right: Target mask (6ch)
-helper.plot_side_by_side([input_images_rgb, target_masks_rgb])
+@tf.function
+def load_image_train(datapoint):
+    input_image = tf.image.resize(datapoint['image'], (128, 128))
+    input_mask = tf.image.resize(datapoint['segmentation_mask'], (128, 128))
 
+    if tf.random.uniform(()) > 0.5:
+        input_image = tf.image.flip_left_right(input_image)
+        input_mask = tf.image.flip_left_right(input_mask)
 
-class SimDataset(Dataset):
-    def __init__(self, count, transform=None):
-        self.input_images, self.target_masks = simulation.generate_random_data(192, 192, count=count)
-        self.transform = transform
+    input_image, input_mask = normalize(input_image, input_mask)
 
-    def __len__(self):
-        return len(self.input_images)
+    return input_image, input_mask
 
-    def __getitem__(self, idx):
-        image = self.input_images[idx]
-        mask = self.target_masks[idx]
-        if self.transform:
-            image = self.transform(image)
 
-        return [image, mask]
+def load_image_test(datapoint):
+    input_image = tf.image.resize(datapoint['image'], (128, 128))
+    input_mask = tf.image.resize(datapoint['segmentation_mask'], (128, 128))
 
+    input_image, input_mask = normalize(input_image, input_mask)
 
-# use the same transformations for train/val in this example
-trans = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  # imagenet
-])
+    return input_image, input_mask
 
-train_set = SimDataset(2000, transform=trans)
-val_set = SimDataset(200, transform=trans)
 
-image_datasets = {
-    'train': train_set, 'val': val_set
-}
+TRAIN_LENGTH = info.splits['train'].num_examples
+BATCH_SIZE = 64
+BUFFER_SIZE = 1000
+STEPS_PER_EPOCH = TRAIN_LENGTH // BATCH_SIZE
 
-batch_size = 25
+train = dataset['train'].map(load_image_train, num_parallel_calls=tf.data.AUTOTUNE)
+test = dataset['test'].map(load_image_test)
 
-dataloaders = {
-    'train': DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0),
-    'val': DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=0)
-}
+train_dataset = train.cache().shuffle(BUFFER_SIZE).batch(BATCH_SIZE).repeat()
+train_dataset = train_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+test_dataset = test.batch(BATCH_SIZE)
 
 
-def reverse_transform(inp):
-    inp = inp.numpy().transpose((1, 2, 0))
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-    inp = std * inp + mean
-    inp = np.clip(inp, 0, 1)
-    inp = (inp * 255).astype(np.uint8)
+def display(display_list):
+    plt.figure(figsize=(15, 15))
 
-    return inp
+    title = ['Input Image', 'True Mask', 'Predicted Mask']
 
+    for i in range(len(display_list)):
+        plt.subplot(1, len(display_list), i + 1)
+        plt.title(title[i])
+        plt.imshow(tf.keras.preprocessing.image.array_to_img(display_list[i]))
+        plt.axis('off')
 
-# Get a batch of training data
-inputs, masks = next(iter(dataloaders['train']))
 
-print(inputs.shape, masks.shape)
+for image, mask in train.take(1):
+    sample_image, sample_mask = image, mask
+display([sample_image, sample_mask])
 
-plt.imshow(reverse_transform(inputs[3]))
+OUTPUT_CHANNELS = 3
+base_model = tf.keras.applications.MobileNetV2(input_shape=[128, 128, 3], include_top=False)
 
+# Use the activations of these layers
+layer_names = [
+    'block_1_expand_relu',  # 64x64
+    'block_3_expand_relu',  # 32x32
+    'block_6_expand_relu',  # 16x16
+    'block_13_expand_relu',  # 8x8
+    'block_16_project',  # 4x4
+]
+layers = [base_model.get_layer(name).output for name in layer_names]
 
-def convrelu(in_channels, out_channels, kernel, padding):
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, kernel, padding=padding),
-        nn.ReLU(inplace=True),
-    )
+# Create the feature extraction model
+down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
 
+down_stack.trainable = False
 
-class ResNetUNet(nn.Module):
-    def __init__(self, n_class):
-        super().__init__()
+up_stack = [
+    pix2pix.upsample(512, 3),  # 4x4 -> 8x8
+    pix2pix.upsample(256, 3),  # 8x8 -> 16x16
+    pix2pix.upsample(128, 3),  # 16x16 -> 32x32
+    pix2pix.upsample(64, 3),  # 32x32 -> 64x64
+]
 
-        self.base_model = models.resnet18(pretrained=True)
-        self.base_layers = list(self.base_model.children())
 
-        self.layer0 = nn.Sequential(*self.base_layers[:3])
-        self.layer0_1x1 = convrelu(64, 64, 1, 0)
-        self.layer1 = nn.Sequential(*self.base_layers[3:5])
-        self.layer1_1x1 = convrelu(64, 64, 1, 0)
-        self.layer2 = self.base_layers[5]
-        self.layer2_1x1 = convrelu(128, 128, 1, 0)
-        self.layer3 = self.base_layers[6]
-        self.layer3_1x1 = convrelu(256, 256, 1, 0)
-        self.layer4 = self.base_layers[7]
-        self.layer4_1x1 = convrelu(512, 512, 1, 0)
+def unet_model(output_channels):
+    inputs = tf.keras.layers.Input(shape=[128, 128, 3])
+    x = inputs
 
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+    # Downsampling through the model
+    skips = down_stack(x)
+    x = skips[-1]
+    skips = reversed(skips[:-1])
 
-        self.conv_up3 = convrelu(256 + 512, 512, 3, 1)
-        self.conv_up2 = convrelu(128 + 512, 256, 3, 1)
-        self.conv_up1 = convrelu(64 + 256, 256, 3, 1)
-        self.conv_up0 = convrelu(64 + 256, 128, 3, 1)
+    # Upsampling and establishing the skip connections
+    for up, skip in zip(up_stack, skips):
+        x = up(x)
+        concat = tf.keras.layers.Concatenate()
+        x = concat([x, skip])
 
-        self.conv_original_size0 = convrelu(3, 64, 3, 1)
-        self.conv_original_size1 = convrelu(64, 64, 3, 1)
-        self.conv_original_size2 = convrelu(64 + 128, 64, 3, 1)
+    # This is the last layer of the model
+    last = tf.keras.layers.Conv2DTranspose(
+        output_channels, 3, strides=2,
+        padding='same')  # 64x64 -> 128x128
 
-        self.conv_last = nn.Conv2d(64, n_class, 1)
+    x = last(x)
 
-    def forward(self, input):
-        x_original = self.conv_original_size0(input)
-        x_original = self.conv_original_size1(x_original)
+    return tf.keras.Model(inputs=inputs, outputs=x)
 
-        layer0 = self.layer0(input)
-        layer1 = self.layer1(layer0)
-        layer2 = self.layer2(layer1)
-        layer3 = self.layer3(layer2)
-        layer4 = self.layer4(layer3)
 
-        layer4 = self.layer4_1x1(layer4)
-        x = self.upsample(layer4)
-        layer3 = self.layer3_1x1(layer3)
-        x = torch.cat([x, layer3], dim=1)
-        x = self.conv_up3(x)
+model = unet_model(OUTPUT_CHANNELS)
+model.compile(optimizer='adam',
+              loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              metrics=['accuracy'])
 
-        x = self.upsample(x)
-        layer2 = self.layer2_1x1(layer2)
-        x = torch.cat([x, layer2], dim=1)
-        x = self.conv_up2(x)
 
-        x = self.upsample(x)
-        layer1 = self.layer1_1x1(layer1)
-        x = torch.cat([x, layer1], dim=1)
-        x = self.conv_up1(x)
+def create_mask(pred_mask):
+    pred_mask = tf.argmax(pred_mask, axis=-1)
+    pred_mask = pred_mask[..., tf.newaxis]
+    return pred_mask[0]
 
-        x = self.upsample(x)
-        layer0 = self.layer0_1x1(layer0)
-        x = torch.cat([x, layer0], dim=1)
-        x = self.conv_up0(x)
 
-        x = self.upsample(x)
-        x = torch.cat([x, x_original], dim=1)
-        x = self.conv_original_size2(x)
+def show_predictions(dataset=None, num=1):
+    if dataset:
+        for image, mask in dataset.take(num):
+            pred_mask = model.predict(image)
+            display([image[0], mask[0], create_mask(pred_mask)])
+    else:
+        display([sample_image, sample_mask,
+                 create_mask(model.predict(sample_image[tf.newaxis, ...]))])
 
-        out = self.conv_last(x)
 
-        return out
+show_predictions()
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = ResNetUNet(n_class=6)
-model = model.to(device)
+EPOCHS = 20
+VAL_SUBSPLITS = 5
+VALIDATION_STEPS = info.splits['test'].num_examples // BATCH_SIZE // VAL_SUBSPLITS
 
-# check keras-like model summary using torchsummary
+model_history = model.fit(train_dataset, epochs=EPOCHS,
+                          steps_per_epoch=STEPS_PER_EPOCH,
+                          validation_steps=VALIDATION_STEPS,
+                          validation_data=test_dataset)
 
-summary(model, input_size=(3, 224, 224))
-
-
-def calc_loss(pred, target, metrics, bce_weight=0.5):
-    bce = F.binary_cross_entropy_with_logits(pred, target)
-
-    pred = F.sigmoid(pred)
-    dice = dice_loss(pred, target)
-
-    loss = bce * bce_weight + dice * (1 - bce_weight)
-
-    metrics['bce'] += bce.data.cpu().numpy() * target.size(0)
-    metrics['dice'] += dice.data.cpu().numpy() * target.size(0)
-    metrics['loss'] += loss.data.cpu().numpy() * target.size(0)
-
-    return loss
-
-
-def print_metrics(metrics, epoch_samples, phase):
-    outputs = []
-    for k in metrics.keys():
-        outputs.append("{}: {:4f}".format(k, metrics[k] / epoch_samples))
-
-    print("{}: {}".format(phase, ", ".join(outputs)))
-
-
-def train_model(model, optimizer, scheduler, num_epochs=25):
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_loss = 1e10
-
-    for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
-        print('-' * 10)
-
-        since = time.time()
-
-        # Each epoch has a training and validation phase
-        for phase in ['train', 'val']:
-            if phase == 'train':
-                scheduler.step()
-                for param_group in optimizer.param_groups:
-                    print("LR", param_group['lr'])
-
-                model.train()  # Set model to training mode
-            else:
-                model.eval()  # Set model to evaluate mode
-
-            metrics = defaultdict(float)
-            epoch_samples = 0
-
-            for inputs, labels in dataloaders[phase]:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
-
-                # zero the parameter gradients
-                optimizer.zero_grad()
-
-                # forward
-                # track history if only in train
-                with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model(inputs)
-                    loss = calc_loss(outputs, labels, metrics)
-
-                    # backward + optimize only if in training phase
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
-
-                # statistics
-                epoch_samples += inputs.size(0)
-
-            print_metrics(metrics, epoch_samples, phase)
-            epoch_loss = metrics['loss'] / epoch_samples
-
-            # deep copy the model
-            if phase == 'val' and epoch_loss < best_loss:
-                print("saving best model")
-                best_loss = epoch_loss
-                best_model_wts = copy.deepcopy(model.state_dict())
-
-        time_elapsed = time.time() - since
-        print('{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-
-    print('Best val loss: {:4f}'.format(best_loss))
-
-    # load best model weights
-    model.load_state_dict(best_model_wts)
-    return model
-
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
-
-num_class = 6
-model = ResNetUNet(num_class).to(device)
-
-# freeze backbone layers
-# for l in model.base_layers:
-#    for param in l.parameters():
-#        param.requires_grad = False
-
-optimizer_ft = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
-
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=30, gamma=0.1)
-
-model = train_model(model, optimizer_ft, exp_lr_scheduler, num_epochs=60)
-
-model.eval()  # Set model to the evaluation mode
-
-# Create another simulation dataset for test
-test_dataset = SimDataset(3, transform=trans)
-test_loader = DataLoader(test_dataset, batch_size=3, shuffle=False, num_workers=0)
-
-# Get the first batch
-inputs, labels = next(iter(test_loader))
-inputs = inputs.to(device)
-labels = labels.to(device)
-
-# Predict
-pred = model(inputs)
-# The loss functions include the sigmoid function.
-pred = F.sigmoid(pred)
-pred = pred.data.cpu().numpy()
-print(pred.shape)
-
-# Change channel-order and make 3 channels for matplot
-input_images_rgb = [reverse_transform(x) for x in inputs.cpu()]
-
-# Map each channel (i.e. class) to each color
-target_masks_rgb = [helper.masks_to_colorimg(x) for x in labels.cpu().numpy()]
-pred_rgb = [helper.masks_to_colorimg(x) for x in pred]
-
-helper.plot_side_by_side([input_images_rgb, target_masks_rgb, pred_rgb])
+show_predictions(test_dataset, 3)
 plt.show()
