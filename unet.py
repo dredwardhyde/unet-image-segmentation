@@ -2,7 +2,6 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-
 dataset, info = tfds.load('oxford_iiit_pet:3.*.*', with_info=True)
 
 
@@ -16,22 +15,17 @@ def normalize(input_image, input_mask):
 def load_image_train(datapoint):
     input_image = tf.image.resize(datapoint['image'], (128, 128))
     input_mask = tf.image.resize(datapoint['segmentation_mask'], (128, 128))
-
     if tf.random.uniform(()) > 0.5:
         input_image = tf.image.flip_left_right(input_image)
         input_mask = tf.image.flip_left_right(input_mask)
-
     input_image, input_mask = normalize(input_image, input_mask)
-
     return input_image, input_mask
 
 
 def load_image_test(datapoint):
     input_image = tf.image.resize(datapoint['image'], (128, 128))
     input_mask = tf.image.resize(datapoint['segmentation_mask'], (128, 128))
-
     input_image, input_mask = normalize(input_image, input_mask)
-
     return input_image, input_mask
 
 
@@ -50,9 +44,7 @@ test_dataset = test.batch(BATCH_SIZE)
 
 def display(display_list):
     plt.figure(figsize=(15, 15))
-
     title = ['Input Image', 'True Mask', 'Predicted Mask']
-
     for i in range(len(display_list)):
         plt.subplot(1, len(display_list), i + 1)
         plt.title(title[i])
@@ -92,7 +84,6 @@ layers = [base_model.get_layer(name).output for name in layer_names]
 
 # Create the feature extraction model
 down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
-
 down_stack.trainable = False
 
 up_stack = [
@@ -151,7 +142,6 @@ def show_predictions(dataset=None, num=1):
 
 
 show_predictions()
-
 
 EPOCHS = 20
 VAL_SUBSPLITS = 5
