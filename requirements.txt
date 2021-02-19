@@ -1,4 +1,4 @@
-tensorflow-gpu; platform_system == "Windows"
-tensorflow; platform_system == "Darwin"
+tensorflow-gpu; platform_system == "windows"
+tensorflow; platform_system == "darwin"
 tensorflow-datasets
 matplotlib
