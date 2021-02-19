@@ -97,25 +97,18 @@ up_stack = [
 def unet_model(output_channels):
     inputs = tf.keras.layers.Input(shape=[128, 128, 3])
     x = inputs
-
     # Downsampling through the model
     skips = down_stack(x)
     x = skips[-1]
     skips = reversed(skips[:-1])
-
     # Upsampling and establishing the skip connections
     for up, skip in zip(up_stack, skips):
         x = up(x)
         concat = tf.keras.layers.Concatenate()
         x = concat([x, skip])
-
     # This is the last layer of the model
-    last = tf.keras.layers.Conv2DTranspose(
-        output_channels, 3, strides=2,
-        padding='same')  # 64x64 -> 128x128
-
+    last = tf.keras.layers.Conv2DTranspose(output_channels, 3, strides=2, padding='same')  # 64x64 -> 128x128
     x = last(x)
-
     return tf.keras.Model(inputs=inputs, outputs=x)
 
 
@@ -147,10 +140,10 @@ EPOCHS = 20
 VAL_SUBSPLITS = 5
 VALIDATION_STEPS = info.splits['test'].num_examples // BATCH_SIZE // VAL_SUBSPLITS
 
-model_history = model.fit(train_dataset, epochs=EPOCHS,
-                          steps_per_epoch=STEPS_PER_EPOCH,
-                          validation_steps=VALIDATION_STEPS,
-                          validation_data=test_dataset)
+model.fit(train_dataset, epochs=EPOCHS,
+          steps_per_epoch=STEPS_PER_EPOCH,
+          validation_steps=VALIDATION_STEPS,
+          validation_data=test_dataset)
 
 show_predictions(test_dataset, 3)
 plt.show()
