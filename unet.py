@@ -2,7 +2,6 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-import pix2pix
 
 dataset, info = tfds.load('oxford_iiit_pet:3.*.*', with_info=True)
 
@@ -61,6 +60,19 @@ def display(display_list):
         plt.axis('off')
 
 
+def upsample(filters, size):
+    initializer = tf.random_normal_initializer(0., 0.02)
+    result = tf.keras.Sequential()
+    result.add(
+        tf.keras.layers.Conv2DTranspose(filters, size, strides=2,
+                                        padding='same',
+                                        kernel_initializer=initializer,
+                                        use_bias=False))
+    result.add(tf.keras.layers.BatchNormalization())
+    result.add(tf.keras.layers.ReLU())
+    return result
+
+
 for image, mask in train.take(1):
     sample_image, sample_mask = image, mask
 display([sample_image, sample_mask])
@@ -84,10 +96,10 @@ down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
 down_stack.trainable = False
 
 up_stack = [
-    pix2pix.upsample(512, 3),  # 4x4 -> 8x8
-    pix2pix.upsample(256, 3),  # 8x8 -> 16x16
-    pix2pix.upsample(128, 3),  # 16x16 -> 32x32
-    pix2pix.upsample(64, 3),  # 32x32 -> 64x64
+    upsample(512, 3),  # 4x4 -> 8x8
+    upsample(256, 3),  # 8x8 -> 16x16
+    upsample(128, 3),  # 16x16 -> 32x32
+    upsample(64, 3),  # 32x32 -> 64x64
 ]
 
 
