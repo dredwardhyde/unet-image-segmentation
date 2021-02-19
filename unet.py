@@ -71,7 +71,6 @@ display([sample_image, sample_mask])
 
 OUTPUT_CHANNELS = 3
 base_model = tf.keras.applications.MobileNetV2(input_shape=[128, 128, 3], include_top=False)
-
 # Use the activations of these layers
 layer_names = [
     'block_1_expand_relu',  # 64x64
@@ -81,11 +80,9 @@ layer_names = [
     'block_16_project',  # 4x4
 ]
 layers = [base_model.get_layer(name).output for name in layer_names]
-
 # Create the feature extraction model
 down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
 down_stack.trainable = False
-
 up_stack = [
     upsample(512, 3),  # 4x4 -> 8x8
     upsample(256, 3),  # 8x8 -> 16x16
@@ -135,15 +132,12 @@ def show_predictions(dataset=None, num=1):
 
 
 show_predictions()
-
 EPOCHS = 20
 VAL_SUBSPLITS = 5
 VALIDATION_STEPS = info.splits['test'].num_examples // BATCH_SIZE // VAL_SUBSPLITS
-
 model.fit(train_dataset, epochs=EPOCHS,
           steps_per_epoch=STEPS_PER_EPOCH,
           validation_steps=VALIDATION_STEPS,
           validation_data=test_dataset)
-
 show_predictions(test_dataset, 3)
 plt.show()
