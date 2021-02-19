@@ -133,8 +133,8 @@ def show_predictions(dataset=None, num=1):
 
 show_predictions()
 EPOCHS = 20
-VAL_SUBSPLITS = 5
-VALIDATION_STEPS = info.splits['test'].num_examples // BATCH_SIZE // VAL_SUBSPLITS
+VAL_SUB_SPLITS = 5
+VALIDATION_STEPS = info.splits['test'].num_examples // BATCH_SIZE // VAL_SUB_SPLITS
 model.fit(train_dataset, epochs=EPOCHS,
           steps_per_epoch=STEPS_PER_EPOCH,
           validation_steps=VALIDATION_STEPS,
